@@ -35,7 +35,10 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB max
 });
 
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.use(cors(origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json());
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
