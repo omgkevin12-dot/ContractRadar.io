@@ -35,7 +35,8 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB max
 });
 
-app.use(cors(origin: "*",
+app.use(cors({
+  origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
