@@ -60,9 +60,9 @@ async function extractContract(filePath, fileName) {
   const base64Data = fileBuffer.toString("base64");
 
   const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 1500,
-    system: `You are a contract analysis expert. Extract contract data and return ONLY valid JSON with no markdown, no preamble, no explanation. Return exactly this shape:
+    model: "claude-sonnet-4-6",
+    max_tokens: 2000,
+    system: `Extract contract data and return ONLY valid JSON with no markdown, no preamble, no explanation. Return exactly this shape:
 {
   "vendor_name": "string",
   "monthly_cost": number or null,
