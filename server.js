@@ -12,6 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
 import Anthropic from "@anthropic-ai/sdk";
 import multer from "multer";
+import mammoth from "mammoth";
 import fs from "fs";
 import path from "path";
 
@@ -27,10 +28,19 @@ const supabase = createClient(
 const resend = new Resend(process.env.RESEND_API_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Accepted contract document MIME types
+const ACCEPTED_MIMETYPES = new Set([
+  "application/pdf",                                                              // .pdf
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",     // .docx
+  "application/msword",                                                           // .doc (legacy Word)
+  "application/rtf",                                                              // .rtf
+  "text/rtf",                                                                     // .rtf (alt MIME)
+]);
+
 const upload = multer({
   dest: "uploads/",
   fileFilter: (_, file, cb) => {
-    cb(null, file.mimetype === "application/pdf");
+    cb(null, ACCEPTED_MIMETYPES.has(file.mimetype));
   },
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB max
 });
@@ -55,14 +65,8 @@ function formatCurrency(n) {
 }
 
 // ─── Claude extraction ──────────────────────────────────────────────────────
-async function extractContract(filePath, fileName) {
-  const fileBuffer = fs.readFileSync(filePath);
-  const base64Data = fileBuffer.toString("base64");
 
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 2000,
-    system: `Extract contract data and return ONLY valid JSON with no markdown, no preamble, no explanation. Return exactly this shape:
+const CLAUDE_SYSTEM_PROMPT = `Extract contract data and return ONLY valid JSON with no markdown, no preamble, no explanation. Return exactly this shape:
 {
   "vendor_name": "string",
   "monthly_cost": number or null,
@@ -83,17 +87,51 @@ async function extractContract(filePath, fileName) {
 }
 
 For red_flags: be specific. Include auto-renewal deadlines (e.g., "Auto-renews Jan 15 — must cancel by Nov 15"), price escalation details, unusual termination clauses, SLA gaps vs stated commitments.
-For overpay_flag: true if signs of overpayment exist (unused capacity, above-market pricing, duplicate services, unnecessary add-ons).`,
-    messages: [{
-      role: "user",
-      content: [
-        {
-          type: "document",
-          source: { type: "base64", media_type: "application/pdf", data: base64Data }
-        },
-        { type: "text", text: `Extract all contract details from this document (${fileName}) and return as JSON only.` }
-      ]
-    }]
+For overpay_flag: true if signs of overpayment exist (unused capacity, above-market pricing, duplicate services, unnecessary add-ons).`;
+
+/**
+ * Build the Claude message content array based on file MIME type.
+ *  - PDF         → native document block (preserves layout, tables)
+ *  - DOCX / DOC  → mammoth text extraction → plain text block
+ *  - RTF         → read as UTF-8 text block
+ */
+async function buildMessageContent(filePath, fileName, mimeType) {
+  const prompt = `Extract all contract details from this document (${fileName}) and return as JSON only.`;
+  const isPDF  = mimeType === "application/pdf";
+  const isWord = mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+               || mimeType === "application/msword";
+  const isRTF  = mimeType === "application/rtf" || mimeType === "text/rtf";
+
+  if (isPDF) {
+    const base64Data = fs.readFileSync(filePath).toString("base64");
+    return [
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64Data } },
+      { type: "text", text: prompt }
+    ];
+  }
+
+  let rawText;
+  if (isWord) {
+    const result = await mammoth.extractRawText({ path: filePath });
+    rawText = result.value?.trim();
+    if (!rawText) throw new Error("No readable text found in Word document.");
+  } else if (isRTF) {
+    rawText = fs.readFileSync(filePath, "utf-8");
+  } else {
+    throw new Error(`Unsupported file type: ${mimeType}`);
+  }
+
+  return [{ type: "text", text: `${prompt}\n\nDocument contents:\n\n${rawText}` }];
+}
+
+async function extractContract(filePath, fileName, mimeType) {
+  const content = await buildMessageContent(filePath, fileName, mimeType);
+
+  const message = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 2000,
+    system: CLAUDE_SYSTEM_PROMPT,
+    messages: [{ role: "user", content }]
   });
 
   const text = message.content.map(b => b.text || "").join("");
@@ -108,17 +146,17 @@ app.get("/health", (_, res) => res.json({ status: "ok", timestamp: new Date().to
 
 /**
  * POST /api/contracts/upload
- * Upload + analyze a PDF contract
+ * Upload + analyze a PDF, Word, or RTF contract
  */
 app.post("/api/contracts/upload", upload.single("contract"), async (req, res) => {
   const { company_id } = req.body;
 
-  if (!req.file) return res.status(400).json({ error: "No PDF file uploaded" });
+  if (!req.file) return res.status(400).json({ error: "No contract file uploaded. Accepted formats: PDF, DOCX, DOC, RTF." });
   if (!company_id) return res.status(400).json({ error: "company_id is required" });
 
   try {
-    // Extract with Claude
-    const extracted = await extractContract(req.file.path, req.file.originalname);
+    // Extract with Claude (file type is inferred from MIME type)
+    const extracted = await extractContract(req.file.path, req.file.originalname, req.file.mimetype);
 
     // Save to Supabase
     const { data, error } = await supabase
