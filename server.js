@@ -25,6 +25,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// Separate anon client used only for verifying user JWTs
+const supabaseAnon = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+// Middleware: verify the Bearer token and attach user to req
+async function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  if (!token) return res.status(401).json({ error: "Not authenticated" });
+  const { data: { user }, error } = await supabaseAnon.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "Invalid or expired session. Please log in again." });
+  req.userId = user.id;
+  req.userEmail = user.email;
+  req.userMeta = user.user_metadata || {};
+  next();
+}
+
 const resend = new Resend(process.env.RESEND_API_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -148,11 +166,10 @@ app.get("/health", (_, res) => res.json({ status: "ok", timestamp: new Date().to
  * POST /api/contracts/upload
  * Upload + analyze a PDF, Word, or RTF contract
  */
-app.post("/api/contracts/upload", upload.single("contract"), async (req, res) => {
-  const { company_id } = req.body;
+app.post("/api/contracts/upload", requireAuth, upload.single("contract"), async (req, res) => {
+  const company_id = req.userId;
 
   if (!req.file) return res.status(400).json({ error: "No contract file uploaded. Accepted formats: PDF, DOCX, DOC, RTF." });
-  if (!company_id) return res.status(400).json({ error: "company_id is required" });
 
   try {
     // Extract with Claude (file type is inferred from MIME type)
@@ -202,9 +219,8 @@ app.post("/api/contracts/upload", upload.single("contract"), async (req, res) =>
  * GET /api/contracts?company_id=xxx
  * Get all contracts for a company
  */
-app.get("/api/contracts", async (req, res) => {
-  const { company_id } = req.query;
-  if (!company_id) return res.status(400).json({ error: "company_id is required" });
+app.get("/api/contracts", requireAuth, async (req, res) => {
+  const company_id = req.userId;
 
   const { data, error } = await supabase
     .from("contracts")
@@ -219,7 +235,7 @@ app.get("/api/contracts", async (req, res) => {
 /**
  * DELETE /api/contracts/:id
  */
-app.delete("/api/contracts/:id", async (req, res) => {
+app.delete("/api/contracts/:id", requireAuth, async (req, res) => {
   const { error } = await supabase
     .from("contracts")
     .delete()
@@ -233,10 +249,11 @@ app.delete("/api/contracts/:id", async (req, res) => {
  * POST /api/alerts/configure
  * Set up email alert preferences for a company
  */
-app.post("/api/alerts/configure", async (req, res) => {
-  const { company_id, email, company_name, alert_days_before, weekly_digest, send_test } = req.body;
+app.post("/api/alerts/configure", requireAuth, async (req, res) => {
+  const company_id = req.userId;
+  const { email, company_name, alert_days_before, weekly_digest, send_test } = req.body;
 
-  if (!company_id || !email) return res.status(400).json({ error: "company_id and email are required" });
+  if (!email) return res.status(400).json({ error: "email is required" });
 
   const { data, error } = await supabase
     .from("alert_configs")
@@ -271,8 +288,8 @@ app.post("/api/alerts/configure", async (req, res) => {
  * POST /api/alerts/send-digest
  * Manually trigger digest for a company
  */
-app.post("/api/alerts/send-digest", async (req, res) => {
-  const { company_id } = req.body;
+app.post("/api/alerts/send-digest", requireAuth, async (req, res) => {
+  const company_id = req.userId;
 
   const { data: config } = await supabase
     .from("alert_configs")
@@ -295,9 +312,8 @@ app.post("/api/alerts/send-digest", async (req, res) => {
  * GET /api/dashboard?company_id=xxx
  * Summary stats for a company
  */
-app.get("/api/dashboard", async (req, res) => {
-  const { company_id } = req.query;
-  if (!company_id) return res.status(400).json({ error: "company_id is required" });
+app.get("/api/dashboard", requireAuth, async (req, res) => {
+  const company_id = req.userId;
 
   const { data: contracts, error } = await supabase
     .from("contracts")
